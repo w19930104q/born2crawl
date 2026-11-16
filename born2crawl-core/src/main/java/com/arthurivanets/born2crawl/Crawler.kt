@@ -93,6 +93,14 @@ class Crawler(private val config: Config) {
         val throttlingConfig: ThrottlingConfig
 
         /**
+         * The maximum number of additional processing attempts that a [CrawlingSession] is allowed to make for a
+         * failing [InputProcessor]+input pair before the pair is treated as permanently failed and skipped.
+         *
+         * A value of 0 (the default) means that a failing pair is not retried at all.
+         */
+        val maxInputProcessingRetries: Int
+
+        /**
          * The factory that is used for the creation of the [CrawlingSession]s for the submitted crawling requests.
          */
         val crawlingSessionFactory: ((CrawlingSession.Config) -> CrawlingSession)
@@ -195,11 +203,13 @@ class Crawler(private val config: Config) {
             maxCrawlDepth: Int = Int.MAX_VALUE,
             traversalAlgorithm: TraversalAlgorithm = TraversalAlgorithm.BFS,
             throttlingConfig: ThrottlingConfig = ThrottlingConfig.NoOp,
+            maxInputProcessingRetries: Int = 0,
         ): Config {
             require(inputProcessors.isNotEmpty()) { "Please, provide at least one InputProcessor" }
             require(crawlingSessionParallelism >= 1) { "CrawlingSession parallelism level cannot be lower than 1" }
             require(inputProcessingBatchSize >= 1) { "Please, provide a valid input processing batch size (MUST BE >= 1). Provided size: $inputProcessingBatchSize" }
             require(maxCrawlDepth >= 1) { "Please, provide a valid max crawl depth (MUST BE >= 1). Provided depth: $maxCrawlDepth" }
+            require(maxInputProcessingRetries >= 0) { "Please, provide a valid max input processing retries count (MUST BE >= 0). Provided count: $maxInputProcessingRetries" }
 
             return object : Config {
                 override val inputProcessors = inputProcessors
@@ -210,6 +220,7 @@ class Crawler(private val config: Config) {
                 override val coroutineDispatcher = Dispatchers.IO
                 override val traversalAlgorithm = traversalAlgorithm
                 override val throttlingConfig = throttlingConfig
+                override val maxInputProcessingRetries = maxInputProcessingRetries
                 override val crawlingSessionFactory = ::CrawlingSessionImpl
                 override val eventListener = eventListener
             }
@@ -289,6 +300,7 @@ class Crawler(private val config: Config) {
                 traversalAlgorithm = config.traversalAlgorithm,
                 throttler = config.throttlingConfig.throttler(),
                 maxCrawlDepth = config.maxCrawlDepth,
+                maxInputProcessingRetries = config.maxInputProcessingRetries,
             )
         ).apply {
             eventListener = ::handleSessionEvent

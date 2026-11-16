@@ -33,7 +33,7 @@ internal class CrawlingSessionImpl(private val config: CrawlingSession.Config) :
     }
 
     private val sessionScope = CoroutineScope(config.coroutineDispatcher + SupervisorJob() + uncaughtExceptionHandler)
-    private val processedInputsTracker = mutableSetOf<String>()
+    private val processingClaimManager = InputProcessingClaimManager()
 
     override var eventListener: ((CrawlingSession.Event) -> Unit)? = null
 
@@ -169,44 +169,77 @@ internal class CrawlingSessionImpl(private val config: CrawlingSession.Config) :
     ): List<InputProcessor.Output> = withContext(config.coroutineDispatcher) {
         val processorInfoString = "InputProcessor(tag = ${source})"
         val inputInfoString = "CrawlingInput(input = ${input.rawInput}, source = ${input.source})"
+        val claimKey = inputKey(this@processInputIfPossible, input)
 
-        if (didProcess(input)) {
-            log.info("$processorInfoString: has already processed the ${inputInfoString} before. Skipping the processing stage.")
+        // Only a single active claim is allowed per InputProcessor + CrawlingInput pair.
+        // Concurrent requesters either wait for the active claim to complete or skip the processing
+        // if the pair has already reached a terminal state.
+        val claim = processingClaimManager.acquire(claimKey)
+
+        if (claim == null) {
+            log.info("$processorInfoString: has already processed the $inputInfoString before. Skipping the processing stage.")
             return@withContext emptyList()
         }
 
         val collectedOutput = mutableListOf<InputProcessor.Output>()
 
-        try {
-            log.info("probing the $processorInfoString with $inputInfoString")
+        while (true) {
+            try {
+                log.info("probing the $processorInfoString with $inputInfoString (attempt = ${claim.attempt})")
 
-            if (canProcess(input, context)) {
-                config.throttler.throttle(this@processInputIfPossible)
+                if (canProcess(input, context)) {
+                    config.throttler.throttle(this@processInputIfPossible)
 
-                log.info("$processorInfoString: processing the ${inputInfoString}...")
+                    log.info("$processorInfoString: processing the $inputInfoString...")
 
-                when (val result = process(input, context)) {
-                    is Result.Success -> collectedOutput.add(result.output)
-                    is Result.Failure -> {
-                        log.warn("$processorInfoString: failed to process the $inputInfoString", result.error)
+                    when (val result = process(input, context)) {
+                        is Result.Success -> {
+                            collectedOutput.add(result.output)
+                            claim.markSucceeded()
+                            return@withContext collectedOutput
+                        }
+
+                        is Result.Failure -> {
+                            log.warn(
+                                "$processorInfoString: failed to process the $inputInfoString (attempt = ${claim.attempt})",
+                                result.error
+                            )
+                        }
                     }
+                } else {
+                    // The processor can't handle this input: release the claim so that a later
+                    // re-discovery of the same input can be probed again (preserves the original semantics).
+                    log.info("$processorInfoString: cannot process the $inputInfoString. Releasing the claim.")
+                    claim.release()
+                    return@withContext emptyList()
                 }
-
-                trackAsProcessed(input)
+            } catch (cancellation: CancellationException) {
+                // Preserve the cancellation semantics and release the claim so that the pair can be
+                // re-processed on the next discovery (e.g. when the session gets cancelled and re-run).
+                log.info("$processorInfoString: processing of the $inputInfoString was cancelled. Releasing the claim.")
+                claim.release()
+                throw cancellation
+            } catch (error: Throwable) {
+                log.error(
+                    "$processorInfoString: failed to process the $inputInfoString (attempt = ${claim.attempt})",
+                    error
+                )
             }
-        } catch (error: Throwable) {
-            log.error("$processorInfoString: failed to process the $inputInfoString", error)
+
+            if (claim.recordFailure(config.maxInputProcessingRetries)) {
+                log.info("$processorInfoString: retrying the processing of the $inputInfoString (attempt = ${claim.attempt})")
+                continue
+            }
+
+            // All the permitted processing attempts have failed: keep the pair in a terminal state
+            // so that it doesn't get re-processed on subsequent discoveries.
+            log.warn("$processorInfoString: exhausted all the processing attempts for the $inputInfoString")
+            claim.markExhausted()
+            return@withContext collectedOutput
         }
 
-        collectedOutput
-    }
-
-    private fun InputProcessor.trackAsProcessed(input: CrawlingInput) {
-        processedInputsTracker.add(inputKey(this, input))
-    }
-
-    private fun InputProcessor.didProcess(input: CrawlingInput): Boolean {
-        return (inputKey(this, input) in processedInputsTracker)
+        @Suppress("UNREACHABLE_CODE")
+        return@withContext emptyList()
     }
 
     private fun inputKey(processor: InputProcessor, input: CrawlingInput): String {

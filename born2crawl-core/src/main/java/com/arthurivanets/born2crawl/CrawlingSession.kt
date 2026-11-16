@@ -38,6 +38,7 @@ interface CrawlingSession {
         val traversalAlgorithm: TraversalAlgorithm = TraversalAlgorithm.BFS,
         val throttler: Throttler = NoThrottling,
         val maxCrawlDepth: Int = Int.MAX_VALUE,
+        val maxInputProcessingRetries: Int = 0,
     )
 
     /**

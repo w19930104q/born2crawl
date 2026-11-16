@@ -29,6 +29,7 @@ fun Crawler.Companion.TestConfig(
     crawlingSessionParallelism: Int = 10,
     inputProcessingBatchSize: Int = 10,
     maxCrawlDepth: Int = Int.MAX_VALUE,
+    maxInputProcessingRetries: Int = 0,
 ): Crawler.Config {
     return object : Crawler.Config {
         override val inputProcessors = inputProcessors
@@ -39,6 +40,7 @@ fun Crawler.Companion.TestConfig(
         override val coroutineDispatcher = coroutineDispatcher
         override val traversalAlgorithm = traversalAlgorithm
         override val throttlingConfig = throttlingConfig
+        override val maxInputProcessingRetries = maxInputProcessingRetries
         override val crawlingSessionFactory = crawlingSessionFactory
         override val eventListener = eventListener
     }
